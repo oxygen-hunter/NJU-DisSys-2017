@@ -20,7 +20,6 @@ package raft
 import (
 	"bytes"
 	"encoding/gob"
-	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -31,7 +30,7 @@ import "labrpc"
 const recvHeartbeatTimeOutL = 150
 const recvHeartbeatTimeOutR = 300
 const heartbeatInterval = 50 * time.Millisecond
-const RPCTimeOut = 200 * time.Millisecond
+const RPCTimeOut = time.Second
 const networkFailRetryTimes int = 25
 const DEBUGING = true
 
@@ -349,23 +348,27 @@ type AppendEntriesReply struct {
 }
 
 // applyCommits
-// apply from rf.lastApplied + 1 to applyEnd (include applyEnd)
+// apply commits from [rf.lastApplied + 1 : applyEnd]
 func (rf *Raft) applyCommits(applyEnd int) {
-	var apply ApplyMsg
+	// rf.mu.lock()
+	// get applyMsg entry and notify rf.applyMsg
+	// rf.mu.unlock()
+
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	go rf.persist()
-	for rf.lastApplied < applyEnd { // get apply entry
+	for rf.lastApplied < applyEnd {
 		rf.lastApplied += 1
-		apply.Index = rf.lastApplied
-		apply.Command = rf.log[apply.Index].Command
-		rf.applyMsg <- apply // notify apply entry
+		var applyMsg ApplyMsg
+		applyMsg.Index = rf.lastApplied
+		applyMsg.Command = rf.log[applyMsg.Index].Command
+		rf.applyMsg <- applyMsg
 	}
-	rf.mu.Unlock()
 }
 
-// Min
+// min
 // return min(a, b)
-func Min(a int, b int) int { // helper function
+func min(a int, b int) int {
 	if a > b {
 		return b
 	}
@@ -375,77 +378,133 @@ func Min(a int, b int) int { // helper function
 // AppendEntries
 // AppendEntries RPC handler.
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-	// TODO
+	// receiver:
+	// reset timer for receiving heartbeat
+	// if args.term < rf.term || rf.log[args.PrevLogIndex].term != args.PrevLogTerm
+	// 	reply.success = false
+	//	return
+	// reply.success = true
+	// update rf.leaderId = args.leaderId
+	// if args.term > rf.term
+	// 	rf.term = args.term
+	// 	rf.votedFor = -1
+	// 	if rf is leader
+	// 		rf change to follower
+	// if AppendEntries is not heartbeat
+	// 	append the args.Entries to logs
+	// if an existing entry conflicts with a new one (same index, different term)
+	// 	delete rf.log[conflict index:-1]
+	// Append any new entries not already in rf.log[]
+	// if args.LeaderCommit > rf.commitIndex
+	// 	rf.commitIndex = min(args.LeaderCommit, index of last new entry)
 	if DEBUGING {
-		// if args.term < rf.currentTerm
-		// 	return true
-		// if rf.log[args.PrevLogIndex].term != args.PrevLogTerm
-		// 	return false
-		// if an existing entry conflicts with a new one (same index, different term)
-		// 	delete rf.log[conflict index:-1]
-		// Append any new entries not already in rf.log[]
-		// if args.LeaderCommit > rf.commitIndex
-		// 	rf.commitIndex = min(args.LeaderCommit, index of last new entry
-
 		rf.resetRecvHeartbeatTimer()
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
-		reply.Term = rf.currentTerm // must set reply term firstly
+		reply.Term = rf.currentTerm
 		if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			reply.Success = false // reply false if term < currentTerm or rf.log doesn't container the matched PrevLogTerm
+			reply.Success = false
 			return
 		}
 		reply.Success = true
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
 			rf.votedFor = -1
-			if rf.leaderId == rf.me { // avoid multi leader
-				rf.leaderId = -1 // become follower
+			if rf.leaderId == rf.me {
+				rf.leaderId = -1
 			}
 		}
-		if rf.leaderId != args.LeaderId { // setup leader
-			rf.leaderId = args.LeaderId
-		}
-		if args.Entries != nil { // not heart beat, append the args.Entries to logs
-			entryId := 0
-			for args.PrevLogIndex++; args.PrevLogIndex < len(rf.log) && entryId < len(args.Entries); args.PrevLogIndex++ {
-				rf.log[args.PrevLogIndex] = args.Entries[entryId] // replace old log item
-				entryId++
+		rf.leaderId = args.LeaderId
+
+		// remove conflict entries and append new entries
+		if args.Entries != nil { // not heartbeat
+			lastEntryIndex := 0
+			for args.PrevLogIndex++; args.PrevLogIndex < len(rf.log) && lastEntryIndex < len(args.Entries); args.PrevLogIndex++ {
+				rf.log[args.PrevLogIndex] = args.Entries[lastEntryIndex]
+				lastEntryIndex++
 			}
-			for ; entryId < len(args.Entries); entryId++ {
-				rf.log = append(rf.log, args.Entries[entryId]) // append the new item
+			for ; lastEntryIndex < len(args.Entries); lastEntryIndex++ {
+				rf.log = append(rf.log, args.Entries[lastEntryIndex])
 			}
 		}
-		if args.LeaderCommit > rf.commitIndex { // update commit index, and match
-			rf.commitIndex = Min(args.LeaderCommit, len(rf.log)-1)
-			go rf.applyCommits(rf.commitIndex) // apply these commits
+		// update commit index, then apply commit message
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+			go rf.applyCommits(rf.commitIndex)
 		}
 	} else {
 
 		//fmt.Printf("server[%d] receive AppendEntries RPC: term=%d, leaderId=%d, prevLogIndex=%d, prevLogTerm=%d\n, leaderCommit=%d\n",
 		//	rf.me, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 		rf.resetRecvHeartbeatTimer()
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		reply.Term = rf.currentTerm
+		if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.Success = false
+			return
+		}
+		reply.Success = true
+		if args.Term > rf.currentTerm {
+			rf.currentTerm = args.Term
+			rf.votedFor = -1
+			if rf.leaderId == rf.me {
+				rf.leaderId = -1
+			}
+		}
+		rf.leaderId = args.LeaderId
+
+		// remove conflict entries and append new entries
+		if args.Entries != nil { // not heartbeat
+			lastEntryIndex := 0
+			for args.PrevLogIndex++; args.PrevLogIndex < len(rf.log) && lastEntryIndex < len(args.Entries); args.PrevLogIndex++ {
+				rf.log[args.PrevLogIndex] = args.Entries[lastEntryIndex]
+				lastEntryIndex++
+			}
+			for ; lastEntryIndex < len(args.Entries); lastEntryIndex++ {
+				rf.log = append(rf.log, args.Entries[lastEntryIndex])
+			}
+		}
+		// update commit index, then apply commit message
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+			go rf.applyCommits(rf.commitIndex)
+		}
 	}
 }
 
 // broadcastAppendEntries
 // broadcast AppendEntries RPC
 func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
-	// TODO
+	// sender:
+	// reset timer for sending heartbeat
+	// send AppendEntries to peers
+	// if rpc fail, retry
+	// if other response term > currentTerm, convert to follower
+	// if success && not heartbeat
+	// 	update next index and match index
+	// else if heartbeat
+	// 	the logEnd is -1
+	// else if RPC fail
+	// 	update the logEnd
+	//
+	// wait for result and decide to commit
 	if DEBUGING {
 		rf.sendHeartbeatTimer.Reset(heartbeatInterval)
-		appendAllNum := len(rf.peers)
-		appendResult := make(chan bool, appendAllNum)
+		appenderNum := len(rf.peers)
+		appendResult := make(chan bool, appenderNum)
 		thisTerm := rf.currentTerm
-
-		for i := 0; i < appendAllNum; i++ { // send to every peers
-			if i == rf.me { // don't send to itself, just accept
+		// send to every peers
+		for i := 0; i < appenderNum; i++ {
+			// accept self
+			if i == rf.me {
 				appendResult <- true
 				rf.resetRecvHeartbeatTimer()
 				continue
 			}
-			go func(serverId int, logEnd int) { // send
+			go func(serverId int, logEnd int) {
 				reply := &AppendEntriesReply{Success: false}
 				var sendEntries []LogEntry = nil
 				for {
@@ -465,13 +524,13 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 
 					retryTimes := networkFailRetryTimes
 					retryWaitTime := time.Nanosecond
-					for retryTimes >= 0 && !rf.peers[serverId].Call("Raft.AppendEntries", args, reply) { // if rpc fail, retry
+					for retryTimes >= 0 && !rf.peers[serverId].Call("Raft.AppendEntries", args, reply) {
 						retryTimes -= 1
 						retryWaitTime <<= 1
 						time.Sleep(retryWaitTime)
 					}
 
-					if reply.Term > rf.currentTerm || rf.leaderId != rf.me { // if other response term > currentTerm, convert to follower
+					if reply.Term > rf.currentTerm || rf.leaderId != rf.me {
 						rf.mu.Lock()
 						rf.leaderId = -1
 						rf.currentTerm = reply.Term
@@ -480,20 +539,20 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 						rf.mu.Unlock()
 						break
 					}
-					if reply.Success { // success
+					if reply.Success {
 						if logEnd != -1 { // if not heart beat
 							rf.mu.Lock()
-							if rf.nextIndex[serverId] < logEnd-1 { // update next index and match index
+							if rf.nextIndex[serverId] < logEnd-1 {
 								rf.nextIndex[serverId] = logEnd - 1
 								rf.matchIndex[serverId] = logEnd - 1
 							}
 							rf.mu.Unlock()
 						}
 						break
-					} else { // fail, but it does not because RPC, (maybe because of not match)
+					} else { // RPC fail or not match
 						rf.mu.Lock()
-						logEnd = len(rf.log)            // the logEnd may be -1 (heart beat), if fail, we update the logEnd too.
-						if rf.nextIndex[serverId] > 1 { // decrement, but must >=1
+						logEnd = len(rf.log)
+						if rf.nextIndex[serverId] > 1 {
 							rf.nextIndex[serverId] -= 1
 						}
 						rf.mu.Unlock()
@@ -505,7 +564,7 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 
 		// wait for result
 		replyOk := 0
-		for i := 0; i < appendAllNum && rf.leaderId == rf.me; i++ {
+		for i := 0; i < appenderNum && rf.leaderId == rf.me; i++ {
 			select { // wait for send results
 			case r := <-appendResult:
 				if updateLogEnd == -1 && i > 1 { // heart beat
@@ -513,7 +572,8 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 				}
 				if updateLogEnd != -1 && r { // not heart beat
 					replyOk += 2
-					if replyOk > appendAllNum { // if the majority of servers accept, commit it
+					// if the majority of servers accept, commit it
+					if replyOk > appenderNum {
 						newCommitIndex := updateLogEnd - 1
 						rf.mu.Lock()
 						if newCommitIndex > rf.commitIndex {
@@ -526,7 +586,8 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 				}
 			case <-time.After(RPCTimeOut):
 				rf.mu.Lock()
-				if i == 1 && rf.leaderId == rf.me { // only receive the response from itself, so the leader is disconnect from network
+				// if the leader is disconnect from network, it will only receive the response from leader self
+				if i == 1 && rf.leaderId == rf.me {
 					rf.leaderId = -1 // convert to follower
 				}
 				rf.mu.Unlock()
@@ -738,12 +799,12 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 					case <-rf.isKilled:
 						return
 					case <-rf.recvHeartbeatTimer.C:
-						fmt.Printf("server[%d] start election\n", rf.me)
+						//fmt.Printf("server[%d] start election\n", rf.me)
 						win := rf.broadcastRequestVote()
 						if win && rf.leaderId == -1 {
 							rf.mu.Lock()
 							rf.leaderId = rf.me
-							fmt.Printf("server[%d] become leader\n", rf.me)
+							//fmt.Printf("server[%d] become leader\n", rf.me)
 							lastLogIndex := len(rf.log)
 							for i := range rf.nextIndex { // dont use for i:=0; i < len(rf.nextIndex); i++, will cause error
 								rf.nextIndex[i] = lastLogIndex
