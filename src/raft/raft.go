@@ -32,7 +32,6 @@ const recvHeartbeatTimeOutR = 300
 const heartbeatInterval = 50 * time.Millisecond
 const RPCTimeOut = time.Second
 const networkFailRetryTimes int = 25
-const DEBUGING = true
 
 // ApplyMsg
 // as each Raft peer becomes aware that successive log entries are
@@ -97,7 +96,6 @@ func (rf *Raft) GetState() (int, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
-	// TODO: Your code here.
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	_ = e.Encode(rf.currentTerm)
@@ -109,7 +107,6 @@ func (rf *Raft) persist() {
 // readPersist
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	// TODO: Your code here.
 	if data != nil {
 		d := gob.NewDecoder(bytes.NewBuffer(data))
 		_ = d.Decode(&rf.currentTerm)
@@ -165,52 +162,29 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	//fmt.Printf("server[%d] receive RequestVote RPC: term=%d, candidateId=%d, lastLogIndex=%d, lastLogTerm=%d\n",
 	//	rf.me, args.Term, args.CandidateId, args.LastLogIndex, args.LastLogTerm)
 
-	if !DEBUGING {
-		rf.mu.Lock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
-		if args.Term > rf.currentTerm { // every server must check this condition, if true, become follower
-			rf.currentTerm = args.Term // update its term
-			rf.votedFor = -1           // if term changed, the voteFor must reset
-			if rf.leaderId == rf.me {  // avoid multi leaders
-				rf.leaderId = -1
-			}
-		}
-		if rf.votedFor == args.CandidateId {
-			reply.VoteGranted = true
-		} else if rf.votedFor == -1 {
-			lastIndex := len(rf.log) - 1 // check safety (more update-to-date)
-			reply.VoteGranted = args.LastLogTerm > rf.log[lastIndex].Term || (args.LastLogTerm == rf.log[lastIndex].Term && args.LastLogIndex >= lastIndex)
-		}
-		if reply.VoteGranted { // if vote granted, reset the timer
-			rf.votedFor = args.CandidateId
-			rf.resetRecvHeartbeatTimer()
-		}
-		rf.mu.Unlock() // defer is a little slower than normal operation
-	} else {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		reply.Term = rf.currentTerm
-		if args.Term < rf.currentTerm {
-			reply.VoteGranted = false
-			return
-		}
-		if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-			rf.votedFor = -1
-			if rf.me == rf.leaderId {
-				rf.leaderId = -1
-			}
-		}
-		lastLogIndex := len(rf.log) - 1
-		lastLogTerm := rf.log[lastLogIndex].Term
-		if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-			(args.LastLogIndex > lastLogIndex || (args.LastLogIndex == lastLogIndex && args.LastLogTerm >= lastLogTerm)) {
-			reply.VoteGranted = true
-			rf.votedFor = args.CandidateId
-			rf.resetRecvHeartbeatTimer()
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		if rf.me == rf.leaderId {
+			rf.leaderId = -1
 		}
 	}
+	lastLogIndex := len(rf.log) - 1
+	lastLogTerm := rf.log[lastLogIndex].Term
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
+		(args.LastLogIndex > lastLogIndex || (args.LastLogIndex == lastLogIndex && args.LastLogTerm >= lastLogTerm)) {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+		rf.resetRecvHeartbeatTimer()
+	}
+
 }
 
 // broadcastRequestVote
@@ -236,97 +210,50 @@ func (rf *Raft) broadcastRequestVote() bool {
 	// select from voteResult, count grantNum and notGrantNum
 	// return granNum > notGrantNum
 
-	if !DEBUGING {
-		rf.mu.Lock()                 // conversion stage (convert to candidate)
-		rf.leaderId = -1             // reset the lead
-		rf.currentTerm += 1          // increment current term
-		rf.votedFor = -1             // vote for reset (not for self to efficient
-		rf.resetRecvHeartbeatTimer() // reset election timer
-		lastLogIndex := len(rf.log) - 1
-		args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIndex, LastLogTerm: rf.log[lastLogIndex].Term}
-		rf.mu.Unlock()
-		voteAllNum := len(rf.peers)
-		voteResult := make(chan bool, voteAllNum)
-		for i := 0; i < voteAllNum; i++ { // send request vote rpc to all servers
-			go func(serverId int) {
-				reply := &RequestVoteReply{VoteGranted: false}
-				if rf.leaderId == -1 && args.Term == rf.currentTerm && rf.peers[serverId].Call("Raft.RequestVote", args, reply) {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm { // change to new term and become follower
-						rf.currentTerm = reply.Term
-						rf.votedFor = -1 // if term changed, the voteFor must reset
-					}
-					rf.mu.Unlock()
+	rf.mu.Lock()
+	rf.leaderId = -1
+	rf.currentTerm += 1
+	rf.votedFor = -1
+	rf.resetRecvHeartbeatTimer()
+	lastLogIndex := len(rf.log) - 1
+	lastLogTerm := rf.log[lastLogIndex].Term
+	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
+	rf.mu.Unlock()
+	voterNum := len(rf.peers)
+	voteResult := make(chan bool, voterNum)
+	for i := 0; i < voterNum; i++ {
+		go func(serverId int) {
+			reply := &RequestVoteReply{VoteGranted: false}
+			if rf.leaderId == -1 && args.Term == rf.currentTerm && rf.peers[serverId].Call("Raft.RequestVote", args, reply) {
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
 				}
-				voteResult <- reply.VoteGranted // send result to the chan
-			}(i)
-		}
-
-		voteGrantedNum := 0 // collect vote results
-		voteNotGrantedNum := 0
-		for i := 0; i < voteAllNum; i++ {
-			select { // wait for vote results
-			case d := <-voteResult:
-				if d { // get granted
-					voteGrantedNum += 2
-				} else {
-					voteNotGrantedNum += 2
-				}
-				if voteGrantedNum > voteAllNum || voteNotGrantedNum > voteAllNum || rf.leaderId != -1 { // stop early
-					break
-				}
-			case <-time.After(RPCTimeOut): // set RPC timeout to avoid RPC spending too long time
-				break
+				rf.mu.Unlock()
 			}
-		}
-		return voteGrantedNum > voteAllNum
-	} else {
-
-		rf.mu.Lock()
-		rf.leaderId = -1
-		rf.currentTerm += 1
-		rf.votedFor = -1
-		rf.resetRecvHeartbeatTimer()
-		lastLogIndex := len(rf.log) - 1
-		lastLogTerm := rf.log[lastLogIndex].Term
-		args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
-		rf.mu.Unlock()
-		voterNum := len(rf.peers)
-		voteResult := make(chan bool, voterNum)
-		for i := 0; i < voterNum; i++ {
-			go func(serverId int) {
-				reply := &RequestVoteReply{VoteGranted: false}
-				if rf.leaderId == -1 && args.Term == rf.currentTerm && rf.peers[serverId].Call("Raft.RequestVote", args, reply) {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.votedFor = -1
-					}
-					rf.mu.Unlock()
-				}
-				voteResult <- reply.VoteGranted
-			}(i)
-		}
-
-		grantNum := 0
-		notGrantNum := 0
-		for i := 0; i < voterNum; i++ {
-			select {
-			case grant := <-voteResult:
-				if grant {
-					grantNum += 1
-				} else {
-					notGrantNum += 1
-				}
-				if grantNum*2 > voterNum || notGrantNum*2 > voterNum || rf.leaderId != -1 {
-					break
-				}
-			case <-time.After(RPCTimeOut): // voter may disconnect, so check timeout here
-				break
-			}
-		}
-		return grantNum*2 > voterNum // voter disconnect
+			voteResult <- reply.VoteGranted
+		}(i)
 	}
+
+	grantNum := 0
+	notGrantNum := 0
+	for i := 0; i < voterNum; i++ {
+		select {
+		case grant := <-voteResult:
+			if grant {
+				grantNum += 1
+			} else {
+				notGrantNum += 1
+			}
+			if grantNum*2 > voterNum || notGrantNum*2 > voterNum || rf.leaderId != -1 {
+				break
+			}
+		case <-time.After(RPCTimeOut): // voter may disconnect, so check timeout here
+			break
+		}
+	}
+	return grantNum*2 > voterNum // voter disconnect
 }
 
 // AppendEntriesArgs
@@ -397,82 +324,43 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	// Append any new entries not already in rf.log[]
 	// if args.LeaderCommit > rf.commitIndex
 	// 	rf.commitIndex = min(args.LeaderCommit, index of last new entry)
-	if DEBUGING {
-		rf.resetRecvHeartbeatTimer()
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
 
-		reply.Term = rf.currentTerm
-		if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			reply.Success = false
-			return
-		}
-		reply.Success = true
-		if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-			rf.votedFor = -1
-			if rf.leaderId == rf.me {
-				rf.leaderId = -1
-			}
-		}
-		rf.leaderId = args.LeaderId
+	rf.resetRecvHeartbeatTimer()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-		// remove conflict entries and append new entries
-		if args.Entries != nil { // not heartbeat
-			lastEntryIndex := 0
-			for args.PrevLogIndex++; args.PrevLogIndex < len(rf.log) && lastEntryIndex < len(args.Entries); args.PrevLogIndex++ {
-				rf.log[args.PrevLogIndex] = args.Entries[lastEntryIndex]
-				lastEntryIndex++
-			}
-			for ; lastEntryIndex < len(args.Entries); lastEntryIndex++ {
-				rf.log = append(rf.log, args.Entries[lastEntryIndex])
-			}
-		}
-		// update commit index, then apply commit message
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-			go rf.applyCommits(rf.commitIndex)
-		}
-	} else {
-
-		//fmt.Printf("server[%d] receive AppendEntries RPC: term=%d, leaderId=%d, prevLogIndex=%d, prevLogTerm=%d\n, leaderCommit=%d\n",
-		//	rf.me, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
-		rf.resetRecvHeartbeatTimer()
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-
-		reply.Term = rf.currentTerm
-		if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			reply.Success = false
-			return
-		}
-		reply.Success = true
-		if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-			rf.votedFor = -1
-			if rf.leaderId == rf.me {
-				rf.leaderId = -1
-			}
-		}
-		rf.leaderId = args.LeaderId
-
-		// remove conflict entries and append new entries
-		if args.Entries != nil { // not heartbeat
-			lastEntryIndex := 0
-			for args.PrevLogIndex++; args.PrevLogIndex < len(rf.log) && lastEntryIndex < len(args.Entries); args.PrevLogIndex++ {
-				rf.log[args.PrevLogIndex] = args.Entries[lastEntryIndex]
-				lastEntryIndex++
-			}
-			for ; lastEntryIndex < len(args.Entries); lastEntryIndex++ {
-				rf.log = append(rf.log, args.Entries[lastEntryIndex])
-			}
-		}
-		// update commit index, then apply commit message
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-			go rf.applyCommits(rf.commitIndex)
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		return
+	}
+	reply.Success = true
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		if rf.leaderId == rf.me {
+			rf.leaderId = -1
 		}
 	}
+	rf.leaderId = args.LeaderId
+
+	// remove conflict entries and append new entries
+	if args.Entries != nil { // not heartbeat
+		lastEntryIndex := 0
+		for args.PrevLogIndex++; args.PrevLogIndex < len(rf.log) && lastEntryIndex < len(args.Entries); args.PrevLogIndex++ {
+			rf.log[args.PrevLogIndex] = args.Entries[lastEntryIndex]
+			lastEntryIndex++
+		}
+		for ; lastEntryIndex < len(args.Entries); lastEntryIndex++ {
+			rf.log = append(rf.log, args.Entries[lastEntryIndex])
+		}
+	}
+	// update commit index, then apply commit message
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		go rf.applyCommits(rf.commitIndex)
+	}
+
 }
 
 // broadcastAppendEntries
@@ -491,123 +379,110 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 	// 	update the logEnd
 	//
 	// wait for result and decide to commit
-	if DEBUGING {
-		rf.sendHeartbeatTimer.Reset(heartbeatInterval)
-		appenderNum := len(rf.peers)
-		appendResult := make(chan bool, appenderNum)
-		thisTerm := rf.currentTerm
-		// send to every peers
-		for i := 0; i < appenderNum; i++ {
-			// accept self
-			if i == rf.me {
-				appendResult <- true
-				rf.resetRecvHeartbeatTimer()
-				continue
-			}
-			go func(serverId int, logEnd int) {
-				reply := &AppendEntriesReply{Success: false}
-				var sendEntries []LogEntry = nil
-				for {
-					rf.mu.Lock()
-					prevLogIndex := rf.nextIndex[serverId] - 1
-					if logEnd != -1 { // not heart beat
-						if rf.leaderId != rf.me || rf.nextIndex[serverId] >= logEnd { // if other goroutine has sent, just return
-							rf.mu.Unlock()
-							break
-						}
-						sendEntries = rf.log[rf.nextIndex[serverId]:logEnd]
-					}
-					args := AppendEntriesArgs{Entries: sendEntries,
-						PrevLogIndex: prevLogIndex, PrevLogTerm: rf.log[prevLogIndex].Term,
-						LeaderId: rf.me, Term: thisTerm, LeaderCommit: rf.commitIndex}
-					rf.mu.Unlock()
 
-					retryTimes := networkFailRetryTimes
-					retryWaitTime := time.Nanosecond
-					for retryTimes >= 0 && !rf.peers[serverId].Call("Raft.AppendEntries", args, reply) {
-						retryTimes -= 1
-						retryWaitTime <<= 1
-						time.Sleep(retryWaitTime)
-					}
-
-					if reply.Term > rf.currentTerm || rf.leaderId != rf.me {
-						rf.mu.Lock()
-						rf.leaderId = -1
-						rf.currentTerm = reply.Term
-						rf.votedFor = -1
-						rf.resetRecvHeartbeatTimer()
-						rf.mu.Unlock()
-						break
-					}
-					if reply.Success {
-						if logEnd != -1 { // if not heart beat
-							rf.mu.Lock()
-							if rf.nextIndex[serverId] < logEnd-1 {
-								rf.nextIndex[serverId] = logEnd - 1
-								rf.matchIndex[serverId] = logEnd - 1
-							}
-							rf.mu.Unlock()
-						}
-						break
-					} else { // RPC fail or not match
-						rf.mu.Lock()
-						logEnd = len(rf.log)
-						if rf.nextIndex[serverId] > 1 {
-							rf.nextIndex[serverId] -= 1
-						}
-						rf.mu.Unlock()
-					}
-				}
-				appendResult <- reply.Success
-			}(i, updateLogEnd)
+	rf.sendHeartbeatTimer.Reset(heartbeatInterval)
+	appenderNum := len(rf.peers)
+	appendResult := make(chan bool, appenderNum)
+	thisTerm := rf.currentTerm
+	// send to every peers
+	for i := 0; i < appenderNum; i++ {
+		// accept self
+		if i == rf.me {
+			appendResult <- true
+			rf.resetRecvHeartbeatTimer()
+			continue
 		}
-
-		// wait for result
-		replyOk := 0
-		for i := 0; i < appenderNum && rf.leaderId == rf.me; i++ {
-			select { // wait for send results
-			case r := <-appendResult:
-				if updateLogEnd == -1 && i > 1 { // heart beat
-					return
+		go func(serverId int, logEnd int) {
+			reply := &AppendEntriesReply{Success: false}
+			var sendEntries []LogEntry = nil
+			for {
+				rf.mu.Lock()
+				prevLogIndex := rf.nextIndex[serverId] - 1
+				if logEnd != -1 { // not heart beat
+					if rf.leaderId != rf.me || rf.nextIndex[serverId] >= logEnd { // if other goroutine has sent, just return
+						rf.mu.Unlock()
+						break
+					}
+					sendEntries = rf.log[rf.nextIndex[serverId]:logEnd]
 				}
-				if updateLogEnd != -1 && r { // not heart beat
-					replyOk += 2
-					// if the majority of servers accept, commit it
-					if replyOk > appenderNum {
-						newCommitIndex := updateLogEnd - 1
+				args := AppendEntriesArgs{Entries: sendEntries,
+					PrevLogIndex: prevLogIndex, PrevLogTerm: rf.log[prevLogIndex].Term,
+					LeaderId: rf.me, Term: thisTerm, LeaderCommit: rf.commitIndex}
+				rf.mu.Unlock()
+
+				retryTimes := networkFailRetryTimes
+				retryWaitTime := time.Nanosecond
+				for retryTimes >= 0 && !rf.peers[serverId].Call("Raft.AppendEntries", args, reply) {
+					retryTimes -= 1
+					retryWaitTime <<= 1
+					time.Sleep(retryWaitTime)
+				}
+
+				if reply.Term > rf.currentTerm || rf.leaderId != rf.me {
+					rf.mu.Lock()
+					rf.leaderId = -1
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+					rf.resetRecvHeartbeatTimer()
+					rf.mu.Unlock()
+					break
+				}
+				if reply.Success {
+					if logEnd != -1 { // if not heart beat
 						rf.mu.Lock()
-						if newCommitIndex > rf.commitIndex {
-							rf.commitIndex = newCommitIndex
-							go rf.applyCommits(newCommitIndex) // apply these commits
+						if rf.nextIndex[serverId] < logEnd-1 {
+							rf.nextIndex[serverId] = logEnd - 1
+							rf.matchIndex[serverId] = logEnd - 1
 						}
 						rf.mu.Unlock()
-						return
 					}
+					break
+				} else { // RPC fail or not match
+					rf.mu.Lock()
+					logEnd = len(rf.log)
+					if rf.nextIndex[serverId] > 1 {
+						rf.nextIndex[serverId] -= 1
+					}
+					rf.mu.Unlock()
 				}
-			case <-time.After(RPCTimeOut):
-				rf.mu.Lock()
-				// if the leader is disconnect from network, it will only receive the response from leader self
-				if i == 1 && rf.leaderId == rf.me {
-					rf.leaderId = -1 // convert to follower
-				}
-				rf.mu.Unlock()
+			}
+			appendResult <- reply.Success
+		}(i, updateLogEnd)
+	}
+
+	// wait for result
+	replyOk := 0
+	for i := 0; i < appenderNum && rf.leaderId == rf.me; i++ {
+		select { // wait for send results
+		case r := <-appendResult:
+			if updateLogEnd == -1 && i > 1 { // heart beat
 				return
 			}
-		}
-	} else {
-		// reset sendHeartbeatTimer
-		// appenderNum = len(peers)
-		// args = {Term: rf.term, LeaderId, PrevLogIndex, PrevLogTerm, Entries, LeaderCommit}
-		//fmt.Printf("server[%d] broadcast AppendEntries RPC\n", rf.me)
-
-		rf.sendHeartbeatTimer.Reset(heartbeatInterval)
-		appenderNum := len(rf.peers)
-		args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
-		reply := &AppendEntriesReply{}
-		for i := 0; i < appenderNum; i++ {
-			rf.peers[i].Call("Raft.AppendEntries", args, reply)
+			if updateLogEnd != -1 && r { // not heart beat
+				replyOk += 2
+				// if the majority of servers accept, commit it
+				if replyOk > appenderNum {
+					newCommitIndex := updateLogEnd - 1
+					rf.mu.Lock()
+					if newCommitIndex > rf.commitIndex {
+						rf.commitIndex = newCommitIndex
+						go rf.applyCommits(newCommitIndex) // apply these commits
+					}
+					rf.mu.Unlock()
+					return
+				}
+			}
+		case <-time.After(RPCTimeOut):
+			rf.mu.Lock()
+			// if the leader is disconnect from network, it will only receive the response from leader self
+			if i == 1 && rf.leaderId == rf.me {
+				rf.leaderId = -1 // convert to follower
+			}
+			rf.mu.Unlock()
+			return
 		}
 	}
+
 }
 
 // Start
@@ -624,42 +499,27 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	// TODO
-	if !DEBUGING {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-
-		index := -1
-		isLeader := rf.leaderId == rf.me
-		term := rf.currentTerm
-		if isLeader {
-			index = len(rf.log)
-			rf.log = append(rf.log, LogEntry{Term: term, Command: command}) // save log to logEntries
-			go rf.broadcastAppendEntries(len(rf.log))                       // send this logEntry to others, and commit
-		}
-		return index, term, isLeader // return immediately
-	} else {
-		// rf.mu.lock()
-		// if rf is leader
-		// 	index = len(rf.log)
-		// 	append rf.log with LogEntry{rf.term, command}
-		// 	broadcast AppendEntries(len(rf.log))
-		// else
-		// 	index = -1
-		// rf.mu.unlock()
-		// return index, rf.term, isLeader
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		index := -1
-		term := rf.currentTerm
-		isLeader := rf.leaderId == rf.me
-		if isLeader {
-			index = len(rf.log)
-			rf.log = append(rf.log, LogEntry{Term: term, Command: command})
-			go rf.broadcastAppendEntries(len(rf.log))
-		}
-		return index, term, isLeader
+	// rf.mu.lock()
+	// if rf is leader
+	// 	index = len(rf.log)
+	// 	append rf.log with LogEntry{rf.term, command}
+	// 	broadcast AppendEntries(len(rf.log))
+	// else
+	// 	index = -1
+	// rf.mu.unlock()
+	// return index, rf.term, isLeader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index := -1
+	term := rf.currentTerm
+	isLeader := rf.leaderId == rf.me
+	if isLeader {
+		index = len(rf.log)
+		rf.log = append(rf.log, LogEntry{Term: term, Command: command})
+		go rf.broadcastAppendEntries(len(rf.log))
 	}
+	return index, term, isLeader
+
 }
 
 // Kill
@@ -669,7 +529,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
-	// TODO: Your code here, if desired.
 	rf.isKilled <- true
 }
 
@@ -685,139 +544,85 @@ func (rf *Raft) Kill() {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
-	if !DEBUGING {
-		rf := &Raft{}
-		rf.peers = peers
-		rf.persister = persister
-		rf.me = me
-		rf.applyMsg = applyCh
-		rf.commitIndex = 0
-		rf.lastApplied = 0
-		rf.nextIndex = make([]int, len(peers))
-		rf.matchIndex = make([]int, len(peers))
-		rf.leaderId = -1
-		rf.recvHeartbeatTimer = time.NewTimer(time.Second)
-		rf.sendHeartbeatTimer = time.NewTimer(0)
-		rf.resetRecvHeartbeatTimer()
-		rf.isKilled = make(chan bool)
-		if rf.me == 0 { // set random seed only once
-			rand.Seed(time.Now().UnixNano())
-		}
 
-		// initialize from state persisted before a crash
-		rf.readPersist(persister.ReadRaftState())
+	rf := &Raft{}
+	rf.peers = peers
+	rf.persister = persister
+	rf.me = me
 
-		go func() { // main goroutine
-			for {
-				if rf.leaderId == rf.me { // leader
-					select {
-					case <-rf.isKilled: // if is killed, stop the main goroutine
-						return
-					case <-rf.sendHeartbeatTimer.C: // leader only wait sendHeartBeatTimer, if timeout, send heartBeat
-						go rf.broadcastAppendEntries(-1) // if timeout, send heartbeat
-					}
-				} else { // follower or candidate
-					select {
-					case <-rf.isKilled: // if is killed, stop the main goroutine
-						return
-					case <-rf.recvHeartbeatTimer.C: // follower only wait waitHeartBeatTimer, if timeout, become candidate
-						// timeout! process conversion stage to convert to candidate, and send requestVotes, try to become leader
-						becomeLeader := rf.broadcastRequestVote()
-						if becomeLeader && rf.leaderId == -1 { // become leader
-							rf.mu.Lock()
-							rf.leaderId = rf.me
-							lastLogIndex := len(rf.log)
-							for i := range rf.nextIndex { // reinitialized after election
-								rf.nextIndex[i] = lastLogIndex
-								rf.matchIndex[i] = 0
-							}
-							rf.mu.Unlock()
-							go rf.broadcastAppendEntries(-1) // send heart beat immediately
-						}
-					}
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+	rf.leaderId = -1
+	rf.isKilled = make(chan bool)
+	rf.applyMsg = applyCh
+	rf.recvHeartbeatTimer = time.NewTimer(0)
+	rf.sendHeartbeatTimer = time.NewTimer(0)
+	rf.resetRecvHeartbeatTimer()
+	rand.Seed(time.Now().UnixNano())
+
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
+	// main goroutine:
+	// 	for loop:
+	// 		if rf is leader
+	// 			case: rf.isKilled
+	//				return
+	// 			case: sendHeartbeatTimer time out
+	// 				rf.sendAppendEntries(empty)
+	// 		else
+	// 			case: rf.isKilled
+	// 				return
+	// 			case: recvHeartbeatTimer time out
+	// 				rf changed to candidate
+	// 				start election
+	// 				win = rf.broadcastRequestVote()
+	// 				if win
+	// 					rf.mu.lock()
+	// 					rf.leaderId = rf.me
+	// 					foreach server[i] in rf.peers:
+	// 						rf.nextIndex[i] = rf.lastLogIndex
+	// 						rf.matchIndex[i] = 0
+	// 					rf.mu.unlock()
+	// 					rf.sendAppendEntries(empty)
+
+	go func() {
+		for {
+			if rf.me == rf.leaderId {
+				select {
+				case <-rf.isKilled:
+					return
+				case <-rf.sendHeartbeatTimer.C:
+					go rf.broadcastAppendEntries(-1)
 				}
-			}
-		}()
-		return rf
-	} else {
-		rf := &Raft{}
-		rf.peers = peers
-		rf.persister = persister
-		rf.me = me
-
-		rf.currentTerm = 0
-		rf.votedFor = -1
-		rf.commitIndex = 0
-		rf.lastApplied = 0
-		rf.nextIndex = make([]int, len(peers))
-		rf.matchIndex = make([]int, len(peers))
-		rf.leaderId = -1
-		rf.isKilled = make(chan bool)
-		rf.applyMsg = applyCh
-		rf.recvHeartbeatTimer = time.NewTimer(0)
-		rf.sendHeartbeatTimer = time.NewTimer(0)
-		rf.resetRecvHeartbeatTimer()
-		rand.Seed(time.Now().UnixNano())
-
-		// initialize from state persisted before a crash
-		rf.readPersist(persister.ReadRaftState())
-
-		// main goroutine:
-		// 	for loop:
-		// 		if rf is leader
-		// 			case: rf.isKilled
-		//				return
-		// 			case: sendHeartbeatTimer time out
-		// 				rf.sendAppendEntries(empty)
-		// 		else
-		// 			case: rf.isKilled
-		// 				return
-		// 			case: recvHeartbeatTimer time out
-		// 				rf changed to candidate
-		// 				start election
-		// 				win = rf.broadcastRequestVote()
-		// 				if win
-		// 					rf.mu.lock()
-		// 					rf.leaderId = rf.me
-		// 					foreach server[i] in rf.peers:
-		// 						rf.nextIndex[i] = rf.lastLogIndex
-		// 						rf.matchIndex[i] = 0
-		// 					rf.mu.unlock()
-		// 					rf.sendAppendEntries(empty)
-
-		go func() {
-			for {
-				if rf.me == rf.leaderId {
-					select {
-					case <-rf.isKilled:
-						return
-					case <-rf.sendHeartbeatTimer.C:
+			} else {
+				select {
+				case <-rf.isKilled:
+					return
+				case <-rf.recvHeartbeatTimer.C:
+					//fmt.Printf("server[%d] start election\n", rf.me)
+					win := rf.broadcastRequestVote()
+					if win && rf.leaderId == -1 {
+						rf.mu.Lock()
+						rf.leaderId = rf.me
+						//fmt.Printf("server[%d] become leader\n", rf.me)
+						lastLogIndex := len(rf.log)
+						for i := range rf.nextIndex { // dont use for i:=0; i < len(rf.nextIndex); i++, will cause error
+							rf.nextIndex[i] = lastLogIndex
+							rf.matchIndex[i] = 0
+						}
+						rf.mu.Unlock()
 						go rf.broadcastAppendEntries(-1)
 					}
-				} else {
-					select {
-					case <-rf.isKilled:
-						return
-					case <-rf.recvHeartbeatTimer.C:
-						//fmt.Printf("server[%d] start election\n", rf.me)
-						win := rf.broadcastRequestVote()
-						if win && rf.leaderId == -1 {
-							rf.mu.Lock()
-							rf.leaderId = rf.me
-							//fmt.Printf("server[%d] become leader\n", rf.me)
-							lastLogIndex := len(rf.log)
-							for i := range rf.nextIndex { // dont use for i:=0; i < len(rf.nextIndex); i++, will cause error
-								rf.nextIndex[i] = lastLogIndex
-								rf.matchIndex[i] = 0
-							}
-							rf.mu.Unlock()
-							go rf.broadcastAppendEntries(-1)
-						}
-					}
 				}
 			}
-		}()
+		}
+	}()
 
-		return rf
-	}
+	return rf
+
 }

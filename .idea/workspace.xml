@@ -4,8 +4,7 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="558ac743-39b1-4d9c-ab46-81873a9bc231" name="Default" comment="pass ass1">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    <list default="true" id="558ac743-39b1-4d9c-ab46-81873a9bc231" name="Default" comment="pass ass1, ass2 - Rejoin, ass3">
       <change beforePath="$PROJECT_DIR$/src/raft/raft.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/raft/raft.go" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -289,6 +288,7 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="add frame of RequestVote RPC, AppendEntries" />
     <MESSAGE value="pass ass1" />
-    <option name="LAST_COMMIT_MESSAGE" value="pass ass1" />
+    <MESSAGE value="pass ass1, ass2 - Rejoin, ass3" />
+    <option name="LAST_COMMIT_MESSAGE" value="pass ass1, ass2 - Rejoin, ass3" />
   </component>
 </project>
