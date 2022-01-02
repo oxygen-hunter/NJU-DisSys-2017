@@ -83,8 +83,7 @@ func (rf *Raft) resetRecvHeartbeatTimer() {
 }
 
 // GetState
-// return currentTerm and whether this server
-// believes it is the leader.
+// return currentTerm and whether this server believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -94,7 +93,6 @@ func (rf *Raft) GetState() (int, bool) {
 // persist
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
@@ -179,7 +177,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(args.LastLogIndex > lastLogIndex || (args.LastLogIndex == lastLogIndex && args.LastLogTerm >= lastLogTerm)) {
+		(args.LastLogIndex > lastLogIndex ||
+			(args.LastLogIndex == lastLogIndex && args.LastLogTerm >= lastLogTerm)) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.resetRecvHeartbeatTimer()
@@ -217,14 +216,16 @@ func (rf *Raft) broadcastRequestVote() bool {
 	rf.resetRecvHeartbeatTimer()
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
-	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
+	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me,
+		LastLogIndex: lastLogIndex, LastLogTerm: lastLogTerm}
 	rf.mu.Unlock()
 	voterNum := len(rf.peers)
 	voteResult := make(chan bool, voterNum)
 	for i := 0; i < voterNum; i++ {
 		go func(serverId int) {
 			reply := &RequestVoteReply{VoteGranted: false}
-			if rf.leaderId == -1 && args.Term == rf.currentTerm && rf.peers[serverId].Call("Raft.RequestVote", args, reply) {
+			if rf.leaderId == -1 && args.Term == rf.currentTerm &&
+				rf.peers[serverId].Call("Raft.RequestVote", args, reply) {
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
@@ -330,7 +331,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	defer rf.mu.Unlock()
 
 	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex ||
+		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
@@ -399,7 +401,7 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 				rf.mu.Lock()
 				prevLogIndex := rf.nextIndex[serverId] - 1
 				if logEnd != -1 { // not heart beat
-					if rf.leaderId != rf.me || rf.nextIndex[serverId] >= logEnd { // if other goroutine has sent, just return
+					if rf.leaderId != rf.me || rf.nextIndex[serverId] >= logEnd {
 						rf.mu.Unlock()
 						break
 					}
@@ -459,9 +461,9 @@ func (rf *Raft) broadcastAppendEntries(updateLogEnd int) {
 				return
 			}
 			if updateLogEnd != -1 && r { // not heart beat
-				replyOk += 2
+				replyOk += 1
 				// if the majority of servers accept, commit it
-				if replyOk > appenderNum {
+				if replyOk*2 > appenderNum {
 					newCommitIndex := updateLogEnd - 1
 					rf.mu.Lock()
 					if newCommitIndex > rf.commitIndex {
